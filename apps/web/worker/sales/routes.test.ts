@@ -37,11 +37,12 @@ function setup() {
   const invited = new Set(["a@example.com", "b@example.com", "x@example.com"]);
   mountSales(app, async c => c.req.header("x-test-user") || null, async (_c, e) => invited.has(e));
   const env = { DB: d1(db) };
-  const call = async (who: string | null, method: string, path: string, body?: unknown, hb = true) => {
-    const h: Record<string, string> = { "content-type": "application/json" };
+  const call = async (who: string | null, method: string, path: string, body?: unknown, hb = true, extra: Record<string, string> = {}) => {
+    const h: Record<string, string> = { "content-type": "application/json", ...extra };
     if (who) h["x-test-user"] = who; if (hb) h["x-hb"] = "1";
     const r = await app.fetch(new Request("https://b.example" + path, { method, headers: h, body: body === undefined ? undefined : JSON.stringify(body) }), env);
-    return { status: r.status, j: await r.json() as any };
+    const text = new TextDecoder("utf-8", { ignoreBOM: true }).decode(await r.arrayBuffer());   // BOM 도 그대로(CSV)
+    return { status: r.status, j: (r.headers.get("content-type") || "").includes("json") ? JSON.parse(text) : null, text, type: r.headers.get("content-type") || "" };
   };
   const join = (team: string, email: string) => db.prepare("INSERT INTO sales_member(team, email, role, added_by, at) VALUES (?,?,?,?,?)").run(team, email, "member", "test", 0);
   const events = (card: string) => (db.prepare("SELECT who, kind FROM sales_event WHERE card = ? ORDER BY id").all(card) as { who: string; kind: string }[]).map(r => ({ ...r }));
@@ -128,4 +129,42 @@ test("팀원 더하기 · 빼기: 관리자만, 초대된 사람만, 마지막 �
   assert.equal((await call(B, "DELETE", `/api/sales/teams/${tid}/members/${encodeURIComponent(A)}`)).status, 403);
   assert.equal((await call(A, "DELETE", `/api/sales/teams/${tid}/members/${encodeURIComponent(B)}`)).status, 200);
   assert.equal((await call(B, "GET", `/api/sales/teams/${tid}/cards`)).status, 404);
+});
+
+test("CSV: 팀원만, 엑셀용(BOM), 수식으로 시작하는 칸은 막음", async () => {
+  const { call } = setup();
+  const tid = (await call(A, "POST", "/api/sales/teams", { name: "영업" })).j.team.id;
+  await call(A, "POST", `/api/sales/teams/${tid}/cards`, { ...card, firm: "=HYPERLINK(1)" });
+  assert.equal((await call(X, "GET", `/api/sales/teams/${tid}/export.csv`)).status, 404);
+  const r = await call(A, "GET", `/api/sales/teams/${tid}/export.csv`);
+  assert.equal(r.status, 200); assert.match(r.type, /text\/csv/);
+  assert.ok(r.text.startsWith("\uFEFF사무소,단계,담당"));
+  assert.match(r.text, /\r\n'=HYPERLINK\(1\),문의,/);
+});
+
+test("기한 목록 열쇠: 관리자만 만듦, 그 팀의 오늘까지 기한만, 다시 만들거나 지우면 앞 열쇠는 끊김", async () => {
+  const { call, join } = setup();
+  const today = new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10);
+  const tid = (await call(A, "POST", "/api/sales/teams", { name: "영업" })).j.team.id; join(tid, B);
+  const other = (await call(X, "POST", "/api/sales/teams", { name: "남" })).j.team.id;
+  await call(A, "POST", `/api/sales/teams/${tid}/cards`, { ...card, firm: "오늘", due: today });
+  await call(A, "POST", `/api/sales/teams/${tid}/cards`, { ...card, firm: "지남", due: "2020-01-01" });
+  await call(A, "POST", `/api/sales/teams/${tid}/cards`, { ...card, firm: "나중", due: "2099-01-01" });
+  await call(A, "POST", `/api/sales/teams/${tid}/cards`, { firm: "보류 끝남", stage: "hold", hold_until: "2020-01-01" });
+  await call(A, "POST", `/api/sales/teams/${tid}/cards`, { firm: "놓침", stage: "lost", lost_reason: "가격" });
+  await call(X, "POST", `/api/sales/teams/${other}/cards`, { ...card, firm: "남의 팀", due: "2020-01-01" });
+  assert.equal((await call(B, "POST", `/api/sales/teams/${tid}/feed-key`)).status, 403, "팀원은 못 만듦");
+  const k1 = (await call(A, "POST", `/api/sales/teams/${tid}/feed-key`)).j.key;
+  assert.match(k1, /^bsk_[A-Za-z0-9_-]{32}$/);
+  assert.equal((await call(null, "GET", "/api/sales/feed")).status, 401);
+  const f = await call(null, "GET", "/api/sales/feed", undefined, false, { authorization: `Bearer ${k1}` });
+  assert.equal(f.status, 200);
+  assert.deepEqual(f.j.items.map((i: { firm: string }) => i.firm).sort(), ["보류 끝남", "오늘", "지남"]);
+  assert.equal(f.j.items.find((i: { firm: string }) => i.firm === "지남").late, true);
+  assert.equal(f.j.items.find((i: { firm: string }) => i.firm === "오늘").late, false);
+  const k2 = (await call(A, "POST", `/api/sales/teams/${tid}/feed-key`)).j.key;
+  assert.equal((await call(null, "GET", "/api/sales/feed", undefined, false, { authorization: `Bearer ${k1}` })).status, 401, "앞 열쇠 끊김");
+  assert.equal((await call(null, "GET", "/api/sales/feed", undefined, false, { authorization: `Bearer ${k2}` })).status, 200);
+  await call(A, "DELETE", `/api/sales/teams/${tid}/feed-key`);
+  assert.equal((await call(null, "GET", "/api/sales/feed", undefined, false, { authorization: `Bearer ${k2}` })).status, 401, "지우면 끊김");
 });

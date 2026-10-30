@@ -1,6 +1,6 @@
 // 영업 보드 API — 팀 하나가 보드 하나(팀원이면 누구나 보고 고침). 회원 보드(owner = 메일)와 따로라 계정 구조는 그대로
 import type { Context, Hono } from "hono";
-import { check, diff, FIELDS, type Card, type Stage, type Source } from "./rules";
+import { check, diff, csv, dueToday, todayKst, FIELDS, STAGES, STAGE_KO, type Card, type Stage, type Source } from "./rules";
 
 type Env = { DB: D1Database };
 type C = Context<{ Bindings: Env }>;
@@ -15,6 +15,8 @@ const cardOf = (r: Row): Card => ({ firm: r.firm, stage: r.stage as Stage, assig
 const view = (r: Row) => ({ id: r.id, ...cardOf(r), ver: r.ver, created_by: r.created_by, created_at: r.created_at, updated_by: r.updated_by, updated_at: r.updated_at });
 const newId = (p: string) => p + [...crypto.getRandomValues(new Uint8Array(12))].map(b => b.toString(36).padStart(2, "0")).join("").slice(0, 20);
 const sameSite = (c: C) => c.req.header("x-hb") === "1" && ["same-origin", "none", undefined].includes(c.req.header("sec-fetch-site"));
+const sha = async (s: string) => [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)))].map(b => b.toString(16).padStart(2, "0")).join("");
+const b64u = (u: Uint8Array) => btoa(String.fromCharCode(...u)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 const body = (c: C) => c.req.json<Record<string, unknown>>().then(b => b && typeof b === "object" && !Array.isArray(b) ? b : null, () => null);
 
 export function mountSales(host: Hono<any>, who: Who, known: Known) {
@@ -116,6 +118,43 @@ export function mountSales(host: Hono<any>, who: Who, known: Known) {
     if (m.role === "admin" && t.members.filter(x => x.role === "admin").length <= 1) return c.json({ ok: false, error: "마지막 관리자는 뺄 수 없어요" }, 400);
     await c.env.DB.prepare("DELETE FROM sales_member WHERE team = ? AND email = ?").bind(t.t.id, email).run();   // 그 사람이 담당인 카드는 그대로(담당을 바꿔 줌)
     return c.json({ ok: true });
+  });
+  // CSV 내보내기 — 팀원 누구나(보드 전체 한 파일)
+  app.get("/api/sales/teams/:team/export.csv", async c => {
+    const t = await team(c); if (t.err) return t.err;
+    const r = await c.env.DB.prepare("SELECT * FROM sales_card WHERE team = ? LIMIT ?").bind(t.t.id, CARDS_MAX).all<Row>();
+    const name = (e: string) => t.members.find(m => m.email === e)?.name || e;
+    const rows = r.results.map(cardOf).sort((x, y) => STAGES.indexOf(x.stage) - STAGES.indexOf(y.stage) || (x.due || "9").localeCompare(y.due || "9"));   // 단계 순 → 기한 순
+    return new Response(csv(rows, name), { headers: { "content-type": "text/csv; charset=utf-8", "content-disposition": `attachment; filename="sales-${todayKst()}.csv"`, "cache-control": "no-store", "x-content-type-options": "nosniff" } });
+  });
+  // 기한 목록 열쇠 — 관리자만 만들고(다시 만들면 앞 열쇠는 바로 끊김) 지움. 값은 이 응답에서 한 번만 보임
+  app.post("/api/sales/teams/:team/feed-key", async c => {
+    const t = await team(c, true); if (t.err) return t.err;
+    if (t.t.role !== "admin") return c.json({ ok: false, error: "관리자만 열쇠를 만들 수 있어요" }, 403);
+    const key = "bsk_" + b64u(crypto.getRandomValues(new Uint8Array(24)));
+    await c.env.DB.prepare("UPDATE sales_team SET feed_hash = ?, feed_by = ?, feed_at = ? WHERE id = ?").bind(await sha(key), t.e, Date.now(), t.t.id).run();
+    return c.json({ ok: true, key });
+  });
+  app.delete("/api/sales/teams/:team/feed-key", async c => {
+    const t = await team(c, true); if (t.err) return t.err;
+    if (t.t.role !== "admin") return c.json({ ok: false, error: "관리자만 열쇠를 지울 수 있어요" }, 403);
+    await c.env.DB.prepare("UPDATE sales_team SET feed_hash = NULL, feed_by = NULL, feed_at = NULL WHERE id = ?").bind(t.t.id).run();
+    return c.json({ ok: true });
+  });
+  // 기한 목록(로그인 없이 열쇠로 — Authorization: Bearer). 그 팀의 오늘 기한 · 지난 진행 카드와 다시 볼 날이 된 보류 카드만, 연락처 칸은 없음
+  app.get("/api/sales/feed", async c => {
+    const key = (c.req.header("authorization") || "").replace(/^Bearer\s+/i, "").trim();
+    if (!/^bsk_[A-Za-z0-9_-]{32}$/.test(key)) return c.json({ ok: false, error: "열쇠" }, 401);
+    const t = await c.env.DB.prepare("SELECT id, name FROM sales_team WHERE feed_hash = ?").bind(await sha(key)).first<{ id: string; name: string }>();
+    if (!t) return c.json({ ok: false, error: "열쇠" }, 401);
+    const today = todayKst();
+    const [cs, ms] = await c.env.DB.batch([
+      c.env.DB.prepare("SELECT * FROM sales_card WHERE team = ? AND ((stage NOT IN ('hold','lost') AND due <= ?) OR (stage = 'hold' AND hold_until <= ?)) ORDER BY due, hold_until LIMIT 500").bind(t.id, today, today),
+      c.env.DB.prepare("SELECT m.email, COALESCE(u.name, '') name FROM sales_member m LEFT JOIN \"user\" u ON lower(u.email) = m.email WHERE m.team = ?").bind(t.id),
+    ]);
+    const names = new Map((ms.results as { email: string; name: string }[]).map(m => [m.email, m.name]));
+    const items = (cs.results as Row[]).filter(r => dueToday(cardOf(r), today)).map(r => ({ id: r.id, firm: r.firm, stage: r.stage, stage_ko: STAGE_KO[r.stage as Stage], assignee: r.assignee, assignee_name: names.get(r.assignee) || "", next: r.next, due: r.due, hold_until: r.hold_until, late: r.stage === "hold" ? r.hold_until! < today : r.due! < today }));
+    return c.json({ ok: true, team: t.name, today, items }, 200, { "cache-control": "no-store" });
   });
   app.get("/api/sales/teams/:team/cards/:id/events", async c => {
     const t = await team(c); if (t.err) return t.err;

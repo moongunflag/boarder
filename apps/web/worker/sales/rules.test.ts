@@ -1,7 +1,7 @@
 // node --test apps/web/worker/sales/rules.test.ts (Node 24 타입 지우기)
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { check, diff, day, addBusinessDays, suggestDue, todayKst } from "./rules.ts";
+import { check, diff, day, addBusinessDays, suggestDue, todayKst, csv, dueToday } from "./rules.ts";
 
 const team = ["a@example.com", "b@example.com"];
 const ok = { firm: "예시 세무회계", assignee: "a@example.com", next: "첫 통화 잡기", due: "2026-11-02" };
@@ -69,4 +69,19 @@ test("기본 기한: 영업일(토 · 일 건너뜀), 당일이 주말이면 월
 test("한국 날짜: UTC 15시가 넘으면 다음 날", () => {
   assert.equal(todayKst(Date.UTC(2026, 9, 30, 14, 59)), "2026-10-30");
   assert.equal(todayKst(Date.UTC(2026, 9, 30, 15, 0)), "2026-10-31");
+});
+
+test("CSV 칸: 쉼표 · 따옴표 · 줄바꿈은 따옴표로 싸고, 빈 값은 빈 칸", () => {
+  const r = check(null, ok, team); assert.ok(r.ok);   // 칸 검사는 줄바꿈을 지우므로 CSV 만 보려고 직접 넣음
+  const lines = csv([{ ...r.card, next: '전화, "오후"\n다시' }], e => e === "a@example.com" ? "김영업" : e).split("\r\n");
+  assert.equal(lines.length, 3);
+  assert.equal(lines[1], '예시 세무회계,문의,김영업,문의,,,"전화, ""오후""\n다시",2026-11-02,,,');
+});
+
+test("아침 알림 대상: 오늘까지 기한인 진행 카드 · 다시 볼 날이 된 보류, 놓침은 빼기", () => {
+  const c = check(null, ok, team); assert.ok(c.ok);
+  assert.equal(dueToday(c.card, "2026-11-01"), false);
+  assert.equal(dueToday(c.card, "2026-11-02"), true);
+  assert.equal(dueToday({ ...c.card, stage: "lost" }, "2026-12-01"), false);
+  assert.equal(dueToday({ ...c.card, stage: "hold", hold_until: "2026-11-05" }, "2026-11-05"), true);
 });

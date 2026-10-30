@@ -97,7 +97,8 @@ function Board({ team, me }: { team: Team; me: string }) {
         <h1 className="mr-2 text-[18px] font-semibold">{team.name}</h1>
         {chip("all", wide ? "전체" : "기한 순", cards.length)}{chip("mine", "내 담당", mine.length)}{chip("late", "기한 지남", late.length)}
         {wide ? null : <>{chip("week", "이번 주")}{chip("stage", "단계별")}</>}
-        <button type="button" onClick={() => setPeople(true)} className="ml-auto h-9 rounded-full border border-[var(--line)] bg-[var(--surface)] px-3 text-[13px]">팀원 {members.length}</button>
+        {wide ? <a href={`/api/sales/teams/${team.id}/export.csv`} download className="ml-auto grid h-9 place-items-center rounded-full border border-[var(--line)] bg-[var(--surface)] px-3 text-[13px]">CSV 내보내기</a> : null}
+        <button type="button" onClick={() => setPeople(true)} className={`${wide ? "" : "ml-auto "}h-9 rounded-full border border-[var(--line)] bg-[var(--surface)] px-3 text-[13px]`}>팀원 {members.length}</button>
         <button type="button" onClick={() => setOpen("new")} className="h-9 rounded-full bg-[var(--ink)] px-4 text-[13px] font-medium text-[var(--bg)]">+ 새 잠재 고객</button>
       </div>
       {note ? <p role="status" className="px-4 pt-2 text-[13px] text-[var(--danger)]">{note}</p> : null}
@@ -192,10 +193,27 @@ function People({ team, me, members, onClose, onChanged }: { team: Team; me: str
           <input id="sales-add" type="email" required placeholder="메일 주소" className="h-11 flex-1 rounded-xl border border-[var(--line)] bg-[var(--surface)] px-3" value={email} onChange={e => setEmail(e.target.value)} />
           <button disabled={busy} className="h-11 rounded-xl bg-[var(--ink)] px-4 font-medium text-[var(--bg)] disabled:opacity-50">더하기</button>
         </form> : null}
+        {admin ? <FeedKey team={team.id} /> : null}
         {err ? <p role="alert" className="text-[13px] text-[var(--danger)]">{err}</p> : null}
         <button type="button" onClick={onClose} className="h-11 rounded-xl border border-[var(--line)]">닫기</button>
       </div>
     </div>
+  );
+}
+
+// 아침 기한 알림을 보내는 밖 프로그램(예: 팀 Slack 봇)에 줄 열쇠. 값은 만든 직후 한 번만 보여 줌
+function FeedKey({ team }: { team: string }) {
+  const [key, setKey] = useState(""), [msg, setMsg] = useState("");
+  const make = async () => { const r = await api<{ key: string }>("POST", `/api/sales/teams/${team}/feed-key`); r.ok ? (setKey(r.key), setMsg("")) : setMsg(r.error); };
+  const drop = async () => { const r = await api("DELETE", `/api/sales/teams/${team}/feed-key`); setKey(""); setMsg(r.ok ? "열쇠를 지웠어요 — 쓰던 곳은 바로 끊겨요" : r.error); };
+  return (
+    <section aria-label="기한 목록 열쇠" className="flex flex-col gap-2 border-t border-[var(--line)] pt-3 text-[13px]">
+      <h3 className="font-medium">기한 목록 열쇠</h3>
+      <p className="text-[var(--soft)]">아침 알림을 보내는 프로그램이 「오늘 기한 · 지난 카드」 목록을 읽을 때 써요. 새로 만들면 앞 열쇠는 끊겨요.</p>
+      {key ? <><input readOnly aria-label="열쇠" value={key} onFocus={e => e.target.select()} className="h-11 rounded-xl border border-[var(--line)] bg-[var(--surface)] px-3 font-mono text-[12px]" /><p className="text-[var(--muted)]">이 창을 닫으면 다시 볼 수 없어요.</p></> : null}
+      <div className="flex gap-2"><button type="button" onClick={make} className="h-10 flex-1 rounded-xl border border-[var(--line)]">열쇠 새로 만들기</button><button type="button" onClick={drop} className="h-10 rounded-xl border border-[var(--line)] px-3 text-[var(--danger)]">지우기</button></div>
+      {msg ? <p role="status">{msg}</p> : null}
+    </section>
   );
 }
 

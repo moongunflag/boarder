@@ -69,3 +69,13 @@ export function addBusinessDays(from: string, n: number): string {
 export const suggestDue = (stage: Stage, today: string) => DUE_DAYS[stage] === undefined ? null : addBusinessDays(today, DUE_DAYS[stage]!);
 // 한국 날짜(기한 비교 · 기본 기한의 「오늘」)
 export const todayKst = (ms = Date.now()) => new Date(ms + 9 * 3600_000).toISOString().slice(0, 10);
+
+// CSV(엑셀용): 맨 앞 BOM(한글), 칸에 쉼표 · 따옴표 · 줄바꿈이 있으면 따옴표로, = + - @ 로 시작하면 앞에 '(수식으로 안 돌게)
+const cell = (v: unknown) => { let s = v === null || v === undefined ? "" : String(v); if (/^[=+\-@\t\r]/.test(s)) s = "'" + s; return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+export const CSV_HEAD = ["사무소", "단계", "담당", "들어온 길", "마지막 연락", "마지막 연락 한 줄", "다음 할 일", "기한", "원문 링크", "다시 볼 날짜", "놓친 이유"];
+export function csv(cards: Card[], name: (email: string) => string): string {
+  const rows = cards.map(c => [c.firm, STAGE_KO[c.stage], name(c.assignee), SOURCE_KO[c.source], c.last_at, c.last_note, c.next, c.due, c.links.join(" "), c.hold_until, c.lost_reason]);
+  return "﻿" + [CSV_HEAD, ...rows].map(r => r.map(cell).join(",")).join("\r\n") + "\r\n";
+}
+// 아침 알림 대상: 기한이 오늘이거나 지난 진행 카드 + 다시 볼 날짜가 된 보류 카드
+export const dueToday = (c: Card, today: string) => c.stage === "hold" ? !!c.hold_until && c.hold_until <= today : c.stage !== "lost" && !!c.due && c.due <= today;
