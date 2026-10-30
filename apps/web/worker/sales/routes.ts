@@ -112,11 +112,17 @@ export function mountSales(host: Hono<any>, who: Who, known: Known) {
   });
   app.delete("/api/sales/teams/:team/members/:email", async c => {
     const t = await team(c, true); if (t.err) return t.err;
-    const email = decodeURIComponent(c.req.param("email") || "").toLowerCase();
+    const email = (c.req.param("email") || "").toLowerCase();   // Hono 가 이미 풀어 줌
     if (t.t.role !== "admin" && email !== t.e) return c.json({ ok: false, error: "관리자만 팀원을 뺄 수 있어요" }, 403);   // 나가기는 누구나
     const m = t.members.find(x => x.email === email); if (!m) return c.json({ ok: false, error: "팀원이 아니에요" }, 404);
     if (m.role === "admin" && t.members.filter(x => x.role === "admin").length <= 1) return c.json({ ok: false, error: "마지막 관리자는 뺄 수 없어요" }, 400);
-    await c.env.DB.prepare("DELETE FROM sales_member WHERE team = ? AND email = ?").bind(t.t.id, email).run();   // 그 사람이 담당인 카드는 그대로(담당을 바꿔 줌)
+    // 그 사람이 담당인 카드는 뺀 관리자에게(스스로 나가면 첫 관리자에게) 넘기고 기록 줄도 남김 — 담당 없는 카드가 생기지 않게
+    const to = m.email === t.e ? t.members.find(x => x.role === "admin" && x.email !== email)?.email || t.e : t.e, now = Date.now();
+    await c.env.DB.batch([
+      c.env.DB.prepare("INSERT INTO sales_event(team, card, who, kind, data, at) SELECT team, id, ?, 'edit', json_object('assignee', json_array(assignee, ?)), ? FROM sales_card WHERE team = ? AND assignee = ?").bind(t.e, to, now, t.t.id, email),
+      c.env.DB.prepare("UPDATE sales_card SET assignee = ?, ver = ver + 1, updated_by = ?, updated_at = ? WHERE team = ? AND assignee = ?").bind(to, t.e, now, t.t.id, email),
+      c.env.DB.prepare("DELETE FROM sales_member WHERE team = ? AND email = ?").bind(t.t.id, email),
+    ]);
     return c.json({ ok: true });
   });
   // CSV 내보내기 — 팀원 누구나(보드 전체 한 파일)
@@ -133,7 +139,7 @@ export function mountSales(host: Hono<any>, who: Who, known: Known) {
     if (t.t.role !== "admin") return c.json({ ok: false, error: "관리자만 열쇠를 만들 수 있어요" }, 403);
     const key = "bsk_" + b64u(crypto.getRandomValues(new Uint8Array(24)));
     await c.env.DB.prepare("UPDATE sales_team SET feed_hash = ?, feed_by = ?, feed_at = ? WHERE id = ?").bind(await sha(key), t.e, Date.now(), t.t.id).run();
-    return c.json({ ok: true, key });
+    return c.json({ ok: true, key }, 200, { "cache-control": "no-store" });
   });
   app.delete("/api/sales/teams/:team/feed-key", async c => {
     const t = await team(c, true); if (t.err) return t.err;

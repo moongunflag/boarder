@@ -45,7 +45,9 @@ export function check(prev: Card | null, input: Record<string, unknown>, members
     c.links = [...new Set(ls as string[])];
   }
   if (!c.firm) return { ok: false, error: "사무소 이름을 넣어 주세요" };
-  if (!members.includes(c.assignee)) return { ok: false, error: "담당은 이 팀 사람이어야 해요" };
+  if (!members.includes(c.assignee) && !(prev && prev.assignee === c.assignee)) return { ok: false, error: "담당은 이 팀 사람이어야 해요" };   // 담당을 안 바꾸면 통과(팀에서 빠진 사람 카드도 옮기기 · 고치기는 됨)
+  if (c.stage !== "hold") c.hold_until = null;   // 그 단계가 아니면 비움(보류 · 놓침에서 되돌린 카드에 옛 날짜 · 이유가 남지 않게)
+  if (c.stage !== "lost") c.lost_reason = "";
   if (c.stage === "hold" && !c.hold_until) return { ok: false, error: "보류는 다시 볼 날짜가 있어야 해요" };
   if (c.stage === "lost" && !c.lost_reason) return { ok: false, error: "놓침은 이유 한 줄이 있어야 해요" };
   if (c.stage !== "hold" && c.stage !== "lost" && (!c.next || !c.due)) return { ok: false, error: "다음 할 일과 기한을 넣어 주세요" };
@@ -75,7 +77,7 @@ const cell = (v: unknown) => { let s = v === null || v === undefined ? "" : Stri
 export const CSV_HEAD = ["사무소", "단계", "담당", "들어온 길", "마지막 연락", "마지막 연락 한 줄", "다음 할 일", "기한", "원문 링크", "다시 볼 날짜", "놓친 이유"];
 export function csv(cards: Card[], name: (email: string) => string): string {
   const rows = cards.map(c => [c.firm, STAGE_KO[c.stage], name(c.assignee), SOURCE_KO[c.source], c.last_at, c.last_note, c.next, c.due, c.links.join(" "), c.hold_until, c.lost_reason]);
-  return "﻿" + [CSV_HEAD, ...rows].map(r => r.map(cell).join(",")).join("\r\n") + "\r\n";
+  return "\uFEFF" + [CSV_HEAD, ...rows].map(r => r.map(cell).join(",")).join("\r\n") + "\r\n";
 }
 // 아침 알림 대상: 기한이 오늘이거나 지난 진행 카드 + 다시 볼 날짜가 된 보류 카드
 export const dueToday = (c: Card, today: string) => c.stage === "hold" ? !!c.hold_until && c.hold_until <= today : c.stage !== "lost" && !!c.due && c.due <= today;

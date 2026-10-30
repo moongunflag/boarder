@@ -127,7 +127,11 @@ test("팀원 더하기 · 빼기: 관리자만, 초대된 사람만, 마지막 �
   assert.equal((await call(X, "POST", `/api/sales/teams/${tid}/members`, { email: X })).status, 404, "밖 사람은 팀이 안 보임");
   assert.equal((await call(A, "DELETE", `/api/sales/teams/${tid}/members/${encodeURIComponent(A)}`)).status, 400, "마지막 관리자");
   assert.equal((await call(B, "DELETE", `/api/sales/teams/${tid}/members/${encodeURIComponent(A)}`)).status, 403);
+  const bc = (await call(A, "POST", `/api/sales/teams/${tid}/cards`, { ...card, assignee: B })).j.card;
   assert.equal((await call(A, "DELETE", `/api/sales/teams/${tid}/members/${encodeURIComponent(B)}`)).status, 200);
+  const after = (await call(A, "GET", `/api/sales/teams/${tid}/cards`)).j.cards.find((c: { id: string }) => c.id === bc.id);
+  assert.equal(after.assignee, A, "빠진 사람 카드는 뺀 관리자에게"); assert.equal(after.ver, 2);
+  assert.equal((await call(A, "PATCH", `/api/sales/teams/${tid}/cards/${bc.id}`, { ver: 2, stage: "contact", due: "2026-11-03" })).status, 200, "넘겨받은 카드 옮기기");
   assert.equal((await call(B, "GET", `/api/sales/teams/${tid}/cards`)).status, 404);
 });
 

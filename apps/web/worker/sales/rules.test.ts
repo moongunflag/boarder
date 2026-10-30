@@ -49,6 +49,18 @@ test("원문 링크: http(s) 만, 10개까지, 겹치면 하나", () => {
   assert.ok(r.ok); assert.deepEqual(r.card.links, ["https://e.example/1"]);
 });
 
+test("팀에서 빠진 담당: 담당을 안 바꾸면 고치기 통과, 다른 밖 사람으로 바꾸기는 거절", () => {
+  const a = check(null, ok, team); assert.ok(a.ok);
+  assert.ok(check(a.card, { stage: "contact" }, ["b@example.com"]).ok);
+  assert.equal(check(a.card, { assignee: "x@example.com" }, ["b@example.com"]).ok, false);
+});
+
+test("보류 · 놓침에서 되돌리면 다시 볼 날짜 · 놓친 이유를 비움", () => {
+  const l = check(null, { firm: "예시", assignee: "a@example.com", stage: "lost", lost_reason: "가격" }, team); assert.ok(l.ok);
+  const back = check(l.card, { stage: "call", next: "다시 연락", due: "2026-11-02" }, team); assert.ok(back.ok);
+  assert.equal(back.card.lost_reason, ""); assert.equal(back.card.hold_until, null);
+});
+
 test("고치기: 받은 칸만 덮고 나머지는 앞 판 그대로, 바뀐 칸만 기록", () => {
   const a = check(null, ok, team); assert.ok(a.ok);
   const b = check(a.card, { stage: "contact", due: "2026-11-03" }, team); assert.ok(b.ok);

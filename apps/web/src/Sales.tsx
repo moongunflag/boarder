@@ -37,12 +37,13 @@ function useWide() {
 
 export function Sales({ email }: { email: string }) {
   const me = email.toLowerCase();
-  const [teams, setTeams] = useState<Team[] | null>(null), [err, setErr] = useState("");
+  const [teams, setTeams] = useState<Team[] | null>(null), [err, setErr] = useState(""), [pick, setPick] = useState("");
   useEffect(() => { api<{ teams: Team[] }>("GET", "/api/sales/teams").then(r => r.ok ? setTeams(r.teams) : setErr(r.error)); }, []);
   if (err) return <Shell><p className="text-[var(--danger)]">{err}</p></Shell>;
   if (!teams) return <Shell><span className="g g-spin" aria-label="불러오는 중" /></Shell>;
   if (!teams.length) return <Shell><NewTeam onDone={t => setTeams([t])} /></Shell>;
-  return <Board team={teams[0]} me={me} />;
+  const team = teams.find(t => t.id === pick) || teams.find(t => t.role === "admin") || teams[0];
+  return <Board key={team.id} team={team} teams={teams} onPick={setPick} me={me} />;
 }
 
 function Shell({ children }: { children: ReactNode }) {
@@ -64,10 +65,10 @@ function NewTeam({ onDone }: { onDone: (t: Team) => void }) {
 }
 
 type Filter = "all" | "mine" | "late" | "week" | "stage";
-function Board({ team, me }: { team: Team; me: string }) {
+function Board({ team, teams, onPick, me }: { team: Team; teams: Team[]; onPick: (id: string) => void; me: string }) {
   const wide = useWide(), today = todayKst();
   const [cards, setCards] = useState<Card[]>([]), [members, setMembers] = useState<Member[]>([]), [loaded, setLoaded] = useState(false);
-  const [filter, setFilter] = useState<Filter>("all"), [open, setOpen] = useState<Card | "new" | null>(null), [note, setNote] = useState(""), [people, setPeople] = useState(false);
+  const [filter, setFilter] = useState<Filter>("all"), [open, setOpen] = useState<Card | "new" | null>(null), [preset, setPreset] = useState<Partial<Draft>>({}), [note, setNote] = useState(""), [people, setPeople] = useState(false);
   const load = useCallback(async () => {
     const r = await api<{ cards: Card[]; members: Member[] }>("GET", `/api/sales/teams/${team.id}/cards`);
     if (r.ok) { setCards(r.cards); setMembers(r.members); setLoaded(true); } else setNote(r.error);
@@ -80,7 +81,7 @@ function Board({ team, me }: { team: Team; me: string }) {
   // 옮기기: 다음 칸의 기한이 새로 시작(그 단계 기본 기한). 보류 · 놓침은 다시 볼 날짜 · 이유가 있어야 해서 카드를 열어 고르게
   const move = async (c: Card, stage: Stage) => {
     if (c.stage === stage) return;
-    if (stage === "hold" || stage === "lost") return setOpen({ ...c, stage });
+    if (stage === "hold" || stage === "lost" || !c.next) { setPreset({ stage, due: suggestDue(stage, today) || "" }); return setOpen(c); }
     const r = await api<{ card: Card }>("PATCH", `/api/sales/teams/${team.id}/cards/${c.id}`, { ver: c.ver, stage, due: suggestDue(stage, today) });
     if (r.ok) { put(r.card); setNote(""); } else { setNote(r.error); if (r.status === 409) load(); }
   };
@@ -95,18 +96,19 @@ function Board({ team, me }: { team: Team; me: string }) {
       <div className="flex flex-wrap items-center gap-2 border-b border-[var(--line)] px-4 py-3">   {/* <header> 는 틀 CSS 가 h1 을 숨김(frame.css) */}
         <a href="/" className="mr-1 text-[13px] text-[var(--muted)] underline-offset-2 hover:underline">보드로</a>
         <h1 className="mr-2 text-[18px] font-semibold">{team.name}</h1>
+        {teams.length > 1 ? <select aria-label="팀 고르기" value={team.id} onChange={e => onPick(e.target.value)} className="h-9 rounded-full border border-[var(--line)] bg-[var(--surface)] px-2 text-[13px]">{teams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}</select> : null}
         {chip("all", wide ? "전체" : "기한 순", cards.length)}{chip("mine", "내 담당", mine.length)}{chip("late", "기한 지남", late.length)}
         {wide ? null : <>{chip("week", "이번 주")}{chip("stage", "단계별")}</>}
         {wide ? <a href={`/api/sales/teams/${team.id}/export.csv`} download className="ml-auto grid h-9 place-items-center rounded-full border border-[var(--line)] bg-[var(--surface)] px-3 text-[13px]">CSV 내보내기</a> : null}
         <button type="button" onClick={() => setPeople(true)} className={`${wide ? "" : "ml-auto "}h-9 rounded-full border border-[var(--line)] bg-[var(--surface)] px-3 text-[13px]`}>팀원 {members.length}</button>
-        <button type="button" onClick={() => setOpen("new")} className="h-9 rounded-full bg-[var(--ink)] px-4 text-[13px] font-medium text-[var(--bg)]">+ 새 잠재 고객</button>
+        <button type="button" onClick={() => { setPreset({}); setOpen("new"); }} className="h-9 rounded-full bg-[var(--ink)] px-4 text-[13px] font-medium text-[var(--bg)]">+ 새 잠재 고객</button>
       </div>
       {note ? <p role="status" className="px-4 pt-2 text-[13px] text-[var(--danger)]">{note}</p> : null}
       {!loaded ? <div className="grid flex-1 place-items-center"><span className="g g-spin" aria-label="불러오는 중" /></div>
-        : wide ? <Columns cards={shown} members={members} today={today} onOpen={setOpen} onMove={move} />
-        : <List cards={shown} members={members} today={today} byStage={filter === "stage"} onOpen={setOpen} />}
+        : wide ? <Columns cards={shown} members={members} today={today} onOpen={c => { setPreset({}); setOpen(c); }} onMove={move} />
+        : <List cards={shown} members={members} today={today} byStage={filter === "stage"} onOpen={c => { setPreset({}); setOpen(c); }} />}
       {people ? <People team={team} me={me} members={members} onClose={() => setPeople(false)} onChanged={load} /> : null}
-      {open ? <CardSheet team={team.id} me={me} card={open === "new" ? null : open} members={members} today={today} onClose={() => setOpen(null)} onSaved={c => { put(c); setOpen(null); }} onStale={load} /> : null}
+      {open ? <CardSheet team={team.id} me={me} card={open === "new" ? null : open} preset={preset} members={members} today={today} onClose={() => setOpen(null)} onSaved={c => { put(c); setOpen(null); }} onStale={load} /> : null}
     </main>
   );
 }
@@ -176,6 +178,7 @@ const evText = (e: Ev) => e.kind === "create" ? "만듦" : Object.entries(e.data
 
 function People({ team, me, members, onClose, onChanged }: { team: Team; me: string; members: Member[]; onClose: () => void; onChanged: () => void }) {
   const [email, setEmail] = useState(""), [err, setErr] = useState(""), [busy, setBusy] = useState(false), admin = team.role === "admin";
+  useEffect(() => { const k = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); }; addEventListener("keydown", k); return () => removeEventListener("keydown", k); }, [onClose]);
   const run = async (p: Promise<Res<object>>) => { setBusy(true); setErr(""); const r = await p; setBusy(false); if (!r.ok) return setErr(r.error); setEmail(""); onChanged(); };
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-[var(--scrim)] md:items-center" onClick={onClose}>
@@ -223,18 +226,21 @@ const draftOf = (c: Card | null, me: string, today: string): Draft => c
   ? { firm: c.firm, stage: c.stage, assignee: c.assignee, source: c.source, last_at: c.last_at || "", last_note: c.last_note, next: c.next, due: c.due || "", links: c.links.join("\n"), hold_until: c.hold_until || "", lost_reason: c.lost_reason }
   : { firm: "", stage: "inquiry", assignee: me, source: "inquiry", last_at: "", last_note: "", next: "", due: suggestDue("inquiry", today) || "", links: "", hold_until: "", lost_reason: "" };
 
-function CardSheet({ team, me, card, members, today, onClose, onSaved, onStale }: { team: string; me: string; card: Card | null; members: Member[]; today: string; onClose: () => void; onSaved: (c: Card) => void; onStale: () => void }) {
-  const [d, setD] = useState<Draft>(() => draftOf(card, me, today)), [busy, setBusy] = useState(false), [err, setErr] = useState(""), [log, setLog] = useState<Ev[] | null>(null);
+function CardSheet({ team, me, card, preset, members, today, onClose, onSaved, onStale }: { team: string; me: string; card: Card | null; preset: Partial<Draft>; members: Member[]; today: string; onClose: () => void; onSaved: (c: Card) => void; onStale: () => void }) {
+  const [d0] = useState<Draft>(() => draftOf(card, me, today)), [ver, setVer] = useState(card?.ver || 0), [d, setD] = useState<Draft>(() => ({ ...d0, ...preset })), [busy, setBusy] = useState(false), [err, setErr] = useState(""), [log, setLog] = useState<Ev[] | null>(null);   // preset = 끌어 옮긴 단계(바꾼 칸으로 셈)
   useEffect(() => { if (card) api<{ events: Ev[] }>("GET", `/api/sales/teams/${team}/cards/${card.id}/events`).then(r => r.ok && setLog(r.events)); }, [team, card?.id]);
   useEffect(() => { const k = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); }; addEventListener("keydown", k); return () => removeEventListener("keydown", k); }, [onClose]);
   const set = <K extends keyof Draft>(k: K, v: Draft[K]) => setD(x => ({ ...x, [k]: v }));
   const save = async () => {
     setBusy(true); setErr("");
-    const body = { ...d, links: d.links.split(/\s+/).filter(Boolean), last_at: d.last_at || null, due: d.due || null, hold_until: d.hold_until || null };
-    const r = card ? await api<{ card: Card }>("PATCH", `/api/sales/teams/${team}/cards/${card.id}`, { ...body, ver: card.ver }) : await api<{ card: Card }>("POST", `/api/sales/teams/${team}/cards`, body);
+    const all = { ...d, links: d.links.split(/\s+/).filter(Boolean), last_at: d.last_at || null, due: d.due || null, hold_until: d.hold_until || null };
+    // 고치기는 내가 바꾼 칸만 보냄(그 사이 다른 사람이 고친 칸을 덮지 않게)
+    const body = card ? Object.fromEntries(Object.entries(all).filter(([k]) => d[k as keyof Draft] !== d0[k as keyof Draft])) : all;
+    const r = card ? await api<{ card: Card }>("PATCH", `/api/sales/teams/${team}/cards/${card.id}`, { ...body, ver }) : await api<{ card: Card }>("POST", `/api/sales/teams/${team}/cards`, body);
     setBusy(false);
     if (r.ok) return onSaved(r.card);
-    setErr(r.error); if (r.status === 409) onStale();
+    if (r.status === 409 && r.card) { setVer(r.card.ver); setErr("다른 사람이 먼저 고쳤어요 — 내 입력은 그대로 두었어요. 다시 저장하면 내가 바꾼 칸만 바뀌어요"); onStale(); return; }
+    setErr(r.error);
   };
   const field = "h-11 rounded-xl border border-[var(--line)] bg-[var(--surface)] px-3 text-[15px]";
   return (
@@ -242,11 +248,11 @@ function CardSheet({ team, me, card, members, today, onClose, onSaved, onStale }
       <form role="dialog" aria-modal="true" aria-label={card ? card.firm : "새 잠재 고객"} onClick={e => e.stopPropagation()} onSubmit={e => { e.preventDefault(); save(); }}
         className="flex max-h-[92dvh] w-full max-w-[520px] flex-col gap-3 overflow-y-auto rounded-t-2xl bg-[var(--bg)] p-5 md:rounded-2xl">
         <h2 className="text-[18px] font-semibold">{card ? card.firm : "새 잠재 고객"}</h2>
-        <L t="사무소"><input className={field} value={d.firm} maxLength={80} required onChange={e => set("firm", e.target.value)} /></L>
+        <L t="사무소"><input className={field} value={d.firm} maxLength={80} required autoFocus={!card} onChange={e => set("firm", e.target.value)} /></L>
         <div className="grid grid-cols-2 gap-3">
           <L t="단계"><select className={field} value={d.stage} onChange={e => { const s = e.target.value as Stage; setD(x => ({ ...x, stage: s, due: s === x.stage ? x.due : suggestDue(s, today) || x.due })); }}>
             {STAGES.map((s, i) => <option key={s} value={s}>{i < 7 ? `${i + 1} ` : ""}{STAGE_KO[s]}</option>)}</select></L>
-          <L t="담당"><select className={field} value={d.assignee} onChange={e => set("assignee", e.target.value)}>{members.map(m => <option key={m.email} value={m.email}>{m.name || m.email}</option>)}</select></L>
+          <L t="담당"><select className={field} value={d.assignee} onChange={e => set("assignee", e.target.value)}>{members.some(m => m.email === d.assignee) ? null : <option value={d.assignee}>{d.assignee} (팀에 없음)</option>}{members.map(m => <option key={m.email} value={m.email}>{m.name || m.email}</option>)}</select></L>
           <L t="들어온 길"><select className={field} value={d.source} onChange={e => set("source", e.target.value as Source)}>{SOURCES.map(s => <option key={s} value={s}>{SOURCE_KO[s]}</option>)}</select></L>
           <L t="마지막 연락"><input type="date" className={field} value={d.last_at} onChange={e => set("last_at", e.target.value)} /></L>
         </div>
