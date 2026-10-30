@@ -1,0 +1,217 @@
+// 영업 보드(/sales) — 팀 하나 = 보드 하나. 넓으면 단계 칸 8개(끌어 옮기기), 좁으면 기한 순 목록(단계 고르기)
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { STAGES, STAGE_KO, SOURCES, SOURCE_KO, suggestDue, addBusinessDays, todayKst, type Stage, type Source } from "../worker/sales/rules";
+
+type Card = { id: string; firm: string; stage: Stage; assignee: string; source: Source; last_at: string | null; last_note: string; next: string; due: string | null; links: string[]; hold_until: string | null; lost_reason: string; ver: number; updated_by: string; updated_at: number };
+type Member = { email: string; role: string; name: string };
+type Team = { id: string; name: string; role: string };
+type Res<T> = ({ ok: true } & T) | { ok: false; error: string; status: number; card?: Card };
+const ERR = "일시적인 오류가 발생했어요";
+async function api<T>(method: string, path: string, body?: unknown): Promise<Res<T>> {
+  const r = await fetch(path, { method, credentials: "include", headers: { "content-type": "application/json", "x-hb": "1" }, body: body === undefined ? undefined : JSON.stringify(body) }).catch(() => null);
+  const j = r ? await r.json().catch(() => ({})) as Record<string, unknown> : {};
+  return r?.ok && j.ok !== false ? { ok: true, ...j } as Res<T> : { ok: false, error: typeof j.error === "string" ? j.error : ERR, status: r?.status || 0, card: j.card as Card | undefined };
+}
+
+// 칸: 1~7 단계 + 보류 · 놓침 한 칸
+const COLS: { key: string; title: string; stages: Stage[] }[] = [
+  ...STAGES.filter(s => s !== "hold" && s !== "lost").map((s, i) => ({ key: s, title: `${i + 1} ${STAGE_KO[s]}`, stages: [s] })),
+  { key: "rest", title: "보류 · 놓침", stages: ["hold", "lost"] },
+];
+const ACTIVE = (c: Card) => c.stage !== "hold" && c.stage !== "lost";
+type Tone = "late" | "soon" | "ok";
+const toneOf = (due: string | null, today: string): Tone | null => !due ? null : due < today ? "late" : due <= addBusinessDays(today, 2) ? "soon" : "ok";
+const TONE: Record<Tone, { cls: string; ko: string }> = {
+  late: { cls: "bg-[var(--dgit-red-bg)] text-[var(--dgit-red)]", ko: "지남" },
+  soon: { cls: "bg-[var(--dgit-amber-bg)] text-[var(--dgit-amber)]", ko: "2영업일 안" },
+  ok: { cls: "bg-[var(--dgit-green-bg)] text-[var(--dgit-green)]", ko: "여유" },
+};
+const md = (d: string) => `${+d.slice(5, 7)}/${+d.slice(8, 10)}`;
+const short = (m: Member[], email: string) => { const x = m.find(y => y.email === email); return x?.name || email.split("@")[0]; };
+
+function useWide() {
+  const q = "(min-width: 861px)", [w, setW] = useState(() => matchMedia(q).matches);
+  useEffect(() => { const m = matchMedia(q), f = () => setW(m.matches); m.addEventListener("change", f); return () => m.removeEventListener("change", f); }, []);
+  return w;
+}
+
+export function Sales({ email }: { email: string }) {
+  const me = email.toLowerCase();
+  const [teams, setTeams] = useState<Team[] | null>(null), [err, setErr] = useState("");
+  useEffect(() => { api<{ teams: Team[] }>("GET", "/api/sales/teams").then(r => r.ok ? setTeams(r.teams) : setErr(r.error)); }, []);
+  if (err) return <Shell><p className="text-[var(--danger)]">{err}</p></Shell>;
+  if (!teams) return <Shell><span className="g g-spin" aria-label="불러오는 중" /></Shell>;
+  if (!teams.length) return <Shell><NewTeam onDone={t => setTeams([t])} /></Shell>;
+  return <Board team={teams[0]} me={me} />;
+}
+
+function Shell({ children }: { children: ReactNode }) {
+  return <main className="mx-auto flex min-h-dvh max-w-[560px] flex-col justify-center gap-4 px-4 text-[var(--ink)]">{children}</main>;
+}
+
+function NewTeam({ onDone }: { onDone: (t: Team) => void }) {
+  const [name, setName] = useState("영업"), [busy, setBusy] = useState(false), [err, setErr] = useState("");
+  const go = async () => { setBusy(true); const r = await api<{ team: Team }>("POST", "/api/sales/teams", { name }); setBusy(false); r.ok ? onDone(r.team) : setErr(r.error); };
+  return (
+    <form className="flex flex-col gap-3" onSubmit={e => { e.preventDefault(); go(); }}>
+      <h1 className="text-[22px] font-semibold">영업 보드 만들기</h1>
+      <p className="text-[var(--soft)]">팀 하나가 보드 하나예요. 만든 사람이 관리자이고, 팀원은 같은 보드를 보고 고쳐요.</p>
+      <label className="flex flex-col gap-1 text-[14px]">팀 이름<input className="h-11 rounded-xl border border-[var(--line)] bg-[var(--surface)] px-3" value={name} maxLength={40} onChange={e => setName(e.target.value)} /></label>
+      <button className="h-11 rounded-xl bg-[var(--ink)] font-medium text-[var(--bg)] disabled:opacity-50" disabled={busy || !name.trim()}>만들기</button>
+      {err ? <p className="text-[var(--danger)]">{err}</p> : null}
+    </form>
+  );
+}
+
+type Filter = "all" | "mine" | "late" | "week" | "stage";
+function Board({ team, me }: { team: Team; me: string }) {
+  const wide = useWide(), today = todayKst();
+  const [cards, setCards] = useState<Card[]>([]), [members, setMembers] = useState<Member[]>([]), [loaded, setLoaded] = useState(false);
+  const [filter, setFilter] = useState<Filter>("all"), [open, setOpen] = useState<Card | "new" | null>(null), [note, setNote] = useState("");
+  const load = useCallback(async () => {
+    const r = await api<{ cards: Card[]; members: Member[] }>("GET", `/api/sales/teams/${team.id}/cards`);
+    if (r.ok) { setCards(r.cards); setMembers(r.members); setLoaded(true); } else setNote(r.error);
+  }, [team.id]);
+  useEffect(() => {
+    load(); const t = setInterval(() => document.visibilityState === "visible" && load(), 30_000), v = () => document.visibilityState === "visible" && load();
+    document.addEventListener("visibilitychange", v); return () => { clearInterval(t); document.removeEventListener("visibilitychange", v); };
+  }, [load]);
+  const put = (c: Card) => setCards(cs => cs.some(x => x.id === c.id) ? cs.map(x => x.id === c.id ? c : x) : [c, ...cs]);
+  // 옮기기: 다음 칸의 기한이 새로 시작(그 단계 기본 기한). 보류 · 놓침은 다시 볼 날짜 · 이유가 있어야 해서 카드를 열어 고르게
+  const move = async (c: Card, stage: Stage) => {
+    if (c.stage === stage) return;
+    if (stage === "hold" || stage === "lost") return setOpen({ ...c, stage });
+    const r = await api<{ card: Card }>("PATCH", `/api/sales/teams/${team.id}/cards/${c.id}`, { ver: c.ver, stage, due: suggestDue(stage, today) });
+    if (r.ok) { put(r.card); setNote(""); } else { setNote(r.error); if (r.status === 409) load(); }
+  };
+  const late = cards.filter(c => ACTIVE(c) && c.due && c.due < today), mine = cards.filter(c => c.assignee === me);
+  const shown = filter === "mine" ? mine : filter === "late" ? late : filter === "week" ? cards.filter(c => ACTIVE(c) && c.due && c.due <= addBusinessDays(today, 5)) : cards;
+  const chip = (f: Filter, label: string, n?: number) => (
+    <button type="button" aria-pressed={filter === f} onClick={() => setFilter(filter === f && f !== "all" ? "all" : f)}
+      className={`h-9 rounded-full border px-3 text-[13px] ${filter === f ? "border-[var(--ink)] bg-[var(--ink)] text-[var(--bg)]" : "border-[var(--line)] bg-[var(--surface)]"}`}>{label}{n === undefined ? "" : ` ${n}`}</button>
+  );
+  return (
+    <main className="flex min-h-dvh flex-col bg-[var(--bg)] text-[var(--ink)]">
+      <div className="flex flex-wrap items-center gap-2 border-b border-[var(--line)] px-4 py-3">   {/* <header> 는 틀 CSS 가 h1 을 숨김(frame.css) */}
+        <a href="/" className="mr-1 text-[13px] text-[var(--muted)] underline-offset-2 hover:underline">보드로</a>
+        <h1 className="mr-2 text-[18px] font-semibold">{team.name}</h1>
+        {chip("all", wide ? "전체" : "기한 순", cards.length)}{chip("mine", "내 담당", mine.length)}{chip("late", "기한 지남", late.length)}
+        {wide ? null : <>{chip("week", "이번 주")}{chip("stage", "단계별")}</>}
+        <button type="button" onClick={() => setOpen("new")} className="ml-auto h-9 rounded-full bg-[var(--ink)] px-4 text-[13px] font-medium text-[var(--bg)]">+ 새 잠재 고객</button>
+      </div>
+      {note ? <p role="status" className="px-4 pt-2 text-[13px] text-[var(--danger)]">{note}</p> : null}
+      {!loaded ? <div className="grid flex-1 place-items-center"><span className="g g-spin" aria-label="불러오는 중" /></div>
+        : wide ? <Columns cards={shown} members={members} today={today} onOpen={setOpen} onMove={move} />
+        : <List cards={shown} members={members} today={today} byStage={filter === "stage"} onOpen={setOpen} />}
+      {open ? <CardSheet team={team.id} me={me} card={open === "new" ? null : open} members={members} today={today} onClose={() => setOpen(null)} onSaved={c => { put(c); setOpen(null); }} onStale={load} /> : null}
+    </main>
+  );
+}
+
+function Face({ c, members, today }: { c: Card; members: Member[]; today: string }) {
+  const t = ACTIVE(c) ? toneOf(c.due, today) : null;
+  return (
+    <>
+      <div className="flex items-start gap-2"><b className="font-medium leading-snug">{c.firm}</b>
+        {t ? <span className={`ml-auto shrink-0 rounded-md px-1.5 text-[12px] font-medium ${TONE[t].cls}`} title={TONE[t].ko}>{t === "late" ? "지남 " : ""}{md(c.due!)}</span> : null}</div>
+      <div className="text-[12px] text-[var(--muted)]">{short(members, c.assignee)} · {SOURCE_KO[c.source]}{ACTIVE(c) ? "" : ` · ${STAGE_KO[c.stage]}`}</div>
+      <div className="text-[13px] text-[var(--soft)]">{c.stage === "hold" ? `다시 볼 날 ${c.hold_until ? md(c.hold_until) : ""}` : c.stage === "lost" ? c.lost_reason : c.next}</div>
+    </>
+  );
+}
+
+function Columns({ cards, members, today, onOpen, onMove }: { cards: Card[]; members: Member[]; today: string; onOpen: (c: Card) => void; onMove: (c: Card, s: Stage) => void }) {
+  const [over, setOver] = useState("");
+  const byId = useMemo(() => new Map(cards.map(c => [c.id, c])), [cards]);
+  return (
+    <div className="flex flex-1 gap-3 overflow-x-auto p-4">
+      {COLS.map(col => {
+        const cs = cards.filter(c => col.stages.includes(c.stage));
+        return (
+          <section key={col.key} aria-label={col.title} onDragOver={e => { e.preventDefault(); setOver(col.key); }} onDragLeave={() => setOver("")}
+            onDrop={e => { e.preventDefault(); setOver(""); const c = byId.get(e.dataTransfer.getData("text/plain")); if (c) onMove(c, col.stages[0]); }}
+            className={`flex min-w-[160px] flex-1 basis-0 flex-col gap-2 rounded-2xl p-2 ${over === col.key ? "bg-[var(--hover)]" : "bg-[var(--sunk)]"}`}>
+            <h2 className="flex items-center px-1 text-[13px] font-medium text-[var(--soft)]">{col.title}<span className="ml-auto text-[var(--muted)]">{cs.length}</span></h2>
+            {cs.map(c => (
+              <button key={c.id} type="button" draggable onDragStart={e => e.dataTransfer.setData("text/plain", c.id)} onClick={() => onOpen(c)}
+                className="flex flex-col gap-1 rounded-xl bg-[var(--surface)] p-3 text-left shadow-[var(--dgit-shadow-card)]"><Face c={c} members={members} today={today} /></button>
+            ))}
+          </section>
+        );
+      })}
+    </div>
+  );
+}
+
+// 폰: 기한 지난 것 먼저, 그다음 기한 가까운 순(기한 없는 보류 · 놓침은 끝). 단계별이면 단계 묶음
+function List({ cards, members, today, byStage, onOpen }: { cards: Card[]; members: Member[]; today: string; byStage: boolean; onOpen: (c: Card) => void }) {
+  const key = (c: Card) => ACTIVE(c) && c.due ? c.due : "9999";
+  const sorted = [...cards].sort((a, b) => key(a).localeCompare(key(b)));
+  const groups = byStage ? COLS.map(col => ({ title: col.title, cs: sorted.filter(c => col.stages.includes(c.stage)) })).filter(g => g.cs.length) : [{ title: "", cs: sorted }];
+  return (
+    <div className="flex flex-col gap-4 p-4">
+      {groups.map(g => (
+        <section key={g.title || "all"} aria-label={g.title || "기한 순"} className="flex flex-col gap-2">
+          {g.title ? <h2 className="text-[13px] font-medium text-[var(--soft)]">{g.title} {g.cs.length}</h2> : null}
+          {g.cs.map(c => (
+            <button key={c.id} type="button" onClick={() => onOpen(c)} className="flex flex-col gap-1 rounded-xl bg-[var(--surface)] p-3 text-left shadow-[var(--dgit-shadow-card)]">
+              <Face c={c} members={members} today={today} />{byStage || !ACTIVE(c) ? null : <div className="text-[12px] text-[var(--muted)]">{STAGE_KO[c.stage]}</div>}
+            </button>
+          ))}
+        </section>
+      ))}
+      {cards.length ? null : <p className="text-center text-[var(--muted)]">카드가 없어요</p>}
+    </div>
+  );
+}
+
+const L = ({ t, children }: { t: string; children: ReactNode }) => <label className="flex flex-col gap-1 text-[13px] text-[var(--soft)]">{t}{children}</label>;
+type Draft = { firm: string; stage: Stage; assignee: string; source: Source; last_at: string; last_note: string; next: string; due: string; links: string; hold_until: string; lost_reason: string };
+const draftOf = (c: Card | null, me: string, today: string): Draft => c
+  ? { firm: c.firm, stage: c.stage, assignee: c.assignee, source: c.source, last_at: c.last_at || "", last_note: c.last_note, next: c.next, due: c.due || "", links: c.links.join("\n"), hold_until: c.hold_until || "", lost_reason: c.lost_reason }
+  : { firm: "", stage: "inquiry", assignee: me, source: "inquiry", last_at: "", last_note: "", next: "", due: suggestDue("inquiry", today) || "", links: "", hold_until: "", lost_reason: "" };
+
+function CardSheet({ team, me, card, members, today, onClose, onSaved, onStale }: { team: string; me: string; card: Card | null; members: Member[]; today: string; onClose: () => void; onSaved: (c: Card) => void; onStale: () => void }) {
+  const [d, setD] = useState<Draft>(() => draftOf(card, me, today)), [busy, setBusy] = useState(false), [err, setErr] = useState("");
+  useEffect(() => { const k = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); }; addEventListener("keydown", k); return () => removeEventListener("keydown", k); }, [onClose]);
+  const set = <K extends keyof Draft>(k: K, v: Draft[K]) => setD(x => ({ ...x, [k]: v }));
+  const save = async () => {
+    setBusy(true); setErr("");
+    const body = { ...d, links: d.links.split(/\s+/).filter(Boolean), last_at: d.last_at || null, due: d.due || null, hold_until: d.hold_until || null };
+    const r = card ? await api<{ card: Card }>("PATCH", `/api/sales/teams/${team}/cards/${card.id}`, { ...body, ver: card.ver }) : await api<{ card: Card }>("POST", `/api/sales/teams/${team}/cards`, body);
+    setBusy(false);
+    if (r.ok) return onSaved(r.card);
+    setErr(r.error); if (r.status === 409) onStale();
+  };
+  const field = "h-11 rounded-xl border border-[var(--line)] bg-[var(--surface)] px-3 text-[15px]";
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-[var(--scrim)] md:items-center" onClick={onClose}>
+      <form role="dialog" aria-modal="true" aria-label={card ? card.firm : "새 잠재 고객"} onClick={e => e.stopPropagation()} onSubmit={e => { e.preventDefault(); save(); }}
+        className="flex max-h-[92dvh] w-full max-w-[520px] flex-col gap-3 overflow-y-auto rounded-t-2xl bg-[var(--bg)] p-5 md:rounded-2xl">
+        <h2 className="text-[18px] font-semibold">{card ? card.firm : "새 잠재 고객"}</h2>
+        <L t="사무소"><input className={field} value={d.firm} maxLength={80} required onChange={e => set("firm", e.target.value)} /></L>
+        <div className="grid grid-cols-2 gap-3">
+          <L t="단계"><select className={field} value={d.stage} onChange={e => { const s = e.target.value as Stage; setD(x => ({ ...x, stage: s, due: s === x.stage ? x.due : suggestDue(s, today) || x.due })); }}>
+            {STAGES.map((s, i) => <option key={s} value={s}>{i < 7 ? `${i + 1} ` : ""}{STAGE_KO[s]}</option>)}</select></L>
+          <L t="담당"><select className={field} value={d.assignee} onChange={e => set("assignee", e.target.value)}>{members.map(m => <option key={m.email} value={m.email}>{m.name || m.email}</option>)}</select></L>
+          <L t="들어온 길"><select className={field} value={d.source} onChange={e => set("source", e.target.value as Source)}>{SOURCES.map(s => <option key={s} value={s}>{SOURCE_KO[s]}</option>)}</select></L>
+          <L t="마지막 연락"><input type="date" className={field} value={d.last_at} onChange={e => set("last_at", e.target.value)} /></L>
+        </div>
+        <L t="마지막 연락 한 줄"><input className={field} value={d.last_note} maxLength={200} onChange={e => set("last_note", e.target.value)} /></L>
+        {d.stage === "hold" ? <L t="다시 볼 날짜"><input type="date" className={field} value={d.hold_until} required onChange={e => set("hold_until", e.target.value)} /></L>
+          : d.stage === "lost" ? <L t="놓친 이유"><input className={field} value={d.lost_reason} maxLength={200} required onChange={e => set("lost_reason", e.target.value)} /></L>
+          : <div className="grid grid-cols-[1fr_auto] gap-3">
+              <L t="다음 할 일"><input className={field} value={d.next} maxLength={200} required onChange={e => set("next", e.target.value)} /></L>
+              <L t="기한"><input type="date" className={field} value={d.due} required onChange={e => set("due", e.target.value)} /></L>
+            </div>}
+        <L t="원문 링크(줄마다 하나 · 연락처는 넣지 않아요)"><textarea className="min-h-[72px] rounded-xl border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-[14px]" value={d.links} onChange={e => set("links", e.target.value)} /></L>
+        {card ? <p className="text-[12px] text-[var(--muted)]">마지막으로 고친 사람 {short(members, card.updated_by)} · {new Date(card.updated_at).toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}</p> : null}
+        {err ? <p role="alert" className="text-[13px] text-[var(--danger)]">{err}</p> : null}
+        <div className="flex gap-2">
+          <button type="button" onClick={onClose} className="h-11 flex-1 rounded-xl border border-[var(--line)]">닫기</button>
+          <button disabled={busy} className="h-11 flex-1 rounded-xl bg-[var(--ink)] font-medium text-[var(--bg)] disabled:opacity-50">{busy ? <span className="g g-spin" aria-label="저장 중" /> : "저장"}</button>
+        </div>
+      </form>
+    </div>
+  );
+}

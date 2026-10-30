@@ -32,6 +32,7 @@ function setup() {
   const db = new DatabaseSync(":memory:");
   const dir = new URL("../../migrations/", import.meta.url);   // 번호에 기대지 않음(받는 쪽이 번호를 바꿀 수 있음) — 이름 끝이 _sales…sql 인 것을 번호 순으로
   for (const f of readdirSync(dir).filter(f => /_sales(_[a-z]+)?\.sql$/.test(f)).sort()) db.exec(readFileSync(new URL(f, dir), "utf8"));
+  db.exec('create table "user" (email text, name text)');   // better-auth 표에서 쓰는 칸만
   const app = new Hono();
   mountSales(app, async c => c.req.header("x-test-user") || null);
   const env = { DB: d1(db) };

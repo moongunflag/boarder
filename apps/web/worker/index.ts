@@ -1336,7 +1336,7 @@ app.all("*", async c => {
     return new HTMLRewriter().on("head", { element: e => { e.append(snippet(c.env), { html: true }); } }).transform(page);
   }
   if (url.pathname === "/login" && c.req.method === "GET") return c.redirect("/", 302);   // 이미 들어온 사람이 랜딩의 「로그인」을 누르면 보드로
-  if (url.pathname === "/device" && c.req.method === "GET") {
+  if ((url.pathname === "/device" || url.pathname === "/sales") && c.req.method === "GET") {   // /sales = 영업 보드(React) — 주인 · 회원 둘 다
     const page = await c.env.ASSETS.fetch(new Request(new URL("/", url), c.req.raw)), h = new Headers(page.headers);
     for (const [k, v] of Object.entries(NOFRAME)) h.set(k, v);
     return new Response(page.body, { status: 200, headers: h });

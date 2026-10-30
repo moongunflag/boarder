@@ -28,7 +28,7 @@ export function mountSales(host: Hono<any>, who: Who) {
     const id = c.req.param("team") || "";
     const rs = await c.env.DB.prepare("SELECT t.id, t.name, m.role FROM sales_team t JOIN sales_member m ON m.team = t.id WHERE t.id = ? AND m.email = ?").bind(id, m.e).first<{ id: string; name: string; role: string }>();
     if (!rs) return { err: c.json({ ok: false, error: "없는 팀이에요" }, 404) };
-    const ms = await c.env.DB.prepare("SELECT email, role FROM sales_member WHERE team = ? ORDER BY at").bind(id).all<{ email: string; role: string }>();
+    const ms = await c.env.DB.prepare("SELECT m.email, m.role, COALESCE(u.name, '') name FROM sales_member m LEFT JOIN \"user\" u ON lower(u.email) = m.email WHERE m.team = ? ORDER BY m.at").bind(id).all<{ email: string; role: string; name: string }>();   // 이름 = 보더 계정 이름(화면에 담당으로)
     return { e: m.e, t: rs, members: ms.results };
   };
 
