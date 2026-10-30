@@ -67,7 +67,7 @@ type Filter = "all" | "mine" | "late" | "week" | "stage";
 function Board({ team, me }: { team: Team; me: string }) {
   const wide = useWide(), today = todayKst();
   const [cards, setCards] = useState<Card[]>([]), [members, setMembers] = useState<Member[]>([]), [loaded, setLoaded] = useState(false);
-  const [filter, setFilter] = useState<Filter>("all"), [open, setOpen] = useState<Card | "new" | null>(null), [note, setNote] = useState("");
+  const [filter, setFilter] = useState<Filter>("all"), [open, setOpen] = useState<Card | "new" | null>(null), [note, setNote] = useState(""), [people, setPeople] = useState(false);
   const load = useCallback(async () => {
     const r = await api<{ cards: Card[]; members: Member[] }>("GET", `/api/sales/teams/${team.id}/cards`);
     if (r.ok) { setCards(r.cards); setMembers(r.members); setLoaded(true); } else setNote(r.error);
@@ -97,12 +97,14 @@ function Board({ team, me }: { team: Team; me: string }) {
         <h1 className="mr-2 text-[18px] font-semibold">{team.name}</h1>
         {chip("all", wide ? "전체" : "기한 순", cards.length)}{chip("mine", "내 담당", mine.length)}{chip("late", "기한 지남", late.length)}
         {wide ? null : <>{chip("week", "이번 주")}{chip("stage", "단계별")}</>}
-        <button type="button" onClick={() => setOpen("new")} className="ml-auto h-9 rounded-full bg-[var(--ink)] px-4 text-[13px] font-medium text-[var(--bg)]">+ 새 잠재 고객</button>
+        <button type="button" onClick={() => setPeople(true)} className="ml-auto h-9 rounded-full border border-[var(--line)] bg-[var(--surface)] px-3 text-[13px]">팀원 {members.length}</button>
+        <button type="button" onClick={() => setOpen("new")} className="h-9 rounded-full bg-[var(--ink)] px-4 text-[13px] font-medium text-[var(--bg)]">+ 새 잠재 고객</button>
       </div>
       {note ? <p role="status" className="px-4 pt-2 text-[13px] text-[var(--danger)]">{note}</p> : null}
       {!loaded ? <div className="grid flex-1 place-items-center"><span className="g g-spin" aria-label="불러오는 중" /></div>
         : wide ? <Columns cards={shown} members={members} today={today} onOpen={setOpen} onMove={move} />
         : <List cards={shown} members={members} today={today} byStage={filter === "stage"} onOpen={setOpen} />}
+      {people ? <People team={team} me={me} members={members} onClose={() => setPeople(false)} onChanged={load} /> : null}
       {open ? <CardSheet team={team.id} me={me} card={open === "new" ? null : open} members={members} today={today} onClose={() => setOpen(null)} onSaved={c => { put(c); setOpen(null); }} onStale={load} /> : null}
     </main>
   );
@@ -165,6 +167,38 @@ function List({ cards, members, today, byStage, onOpen }: { cards: Card[]; membe
   );
 }
 
+type Ev = { who: string; kind: string; data: Record<string, [unknown, unknown]>; at: number };
+const FIELD_KO: Record<string, string> = { firm: "사무소", stage: "단계", assignee: "담당", source: "들어온 길", last_at: "마지막 연락", last_note: "연락 한 줄", next: "다음 할 일", due: "기한", links: "원문 링크", hold_until: "다시 볼 날짜", lost_reason: "놓친 이유" };
+const when = (ms: number) => new Date(ms).toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
+const val = (k: string, v: unknown) => v === null || v === "" ? "없음" : k === "stage" ? STAGE_KO[v as Stage] : k === "source" ? SOURCE_KO[v as Source] : Array.isArray(v) ? `${v.length}개` : String(v).slice(0, 40);
+const evText = (e: Ev) => e.kind === "create" ? "만듦" : Object.entries(e.data).map(([k, [a, b]]) => k === "assignee" || k === "next" || k === "last_note" ? `${FIELD_KO[k]} 고침` : `${FIELD_KO[k] || k} ${val(k, a)} → ${val(k, b)}`).join(", ");
+
+function People({ team, me, members, onClose, onChanged }: { team: Team; me: string; members: Member[]; onClose: () => void; onChanged: () => void }) {
+  const [email, setEmail] = useState(""), [err, setErr] = useState(""), [busy, setBusy] = useState(false), admin = team.role === "admin";
+  const run = async (p: Promise<Res<object>>) => { setBusy(true); setErr(""); const r = await p; setBusy(false); if (!r.ok) return setErr(r.error); setEmail(""); onChanged(); };
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-[var(--scrim)] md:items-center" onClick={onClose}>
+      <div role="dialog" aria-modal="true" aria-label="팀원" onClick={e => e.stopPropagation()} className="flex w-full max-w-[440px] flex-col gap-3 rounded-t-2xl bg-[var(--bg)] p-5 md:rounded-2xl">
+        <h2 className="text-[18px] font-semibold">팀원</h2>
+        <p className="text-[13px] text-[var(--soft)]">팀원은 이 보드를 같이 보고 고쳐요. {admin ? "보더에 초대된 사람만 더할 수 있어요." : "팀원을 더하고 빼는 것은 관리자가 해요."}</p>
+        <ul className="flex flex-col gap-1">{members.map(m => (
+          <li key={m.email} className="flex min-h-11 items-center gap-2 border-b border-[var(--line)] text-[14px]">
+            <span>{m.name || m.email.split("@")[0]}</span><span className="text-[12px] text-[var(--muted)]">{m.email}{m.role === "admin" ? " · 관리자" : ""}</span>
+            {(admin && m.email !== me) || (!admin && m.email === me) ? <button type="button" disabled={busy} className="ml-auto text-[13px] text-[var(--danger)]" onClick={() => run(api("DELETE", `/api/sales/teams/${team.id}/members/${encodeURIComponent(m.email)}`))}>{m.email === me ? "나가기" : "빼기"}</button> : null}
+          </li>))}
+        </ul>
+        {admin ? <form className="flex gap-2" onSubmit={e => { e.preventDefault(); run(api("POST", `/api/sales/teams/${team.id}/members`, { email })); }}>
+          <label className="sr-only" htmlFor="sales-add">더할 사람 메일</label>
+          <input id="sales-add" type="email" required placeholder="메일 주소" className="h-11 flex-1 rounded-xl border border-[var(--line)] bg-[var(--surface)] px-3" value={email} onChange={e => setEmail(e.target.value)} />
+          <button disabled={busy} className="h-11 rounded-xl bg-[var(--ink)] px-4 font-medium text-[var(--bg)] disabled:opacity-50">더하기</button>
+        </form> : null}
+        {err ? <p role="alert" className="text-[13px] text-[var(--danger)]">{err}</p> : null}
+        <button type="button" onClick={onClose} className="h-11 rounded-xl border border-[var(--line)]">닫기</button>
+      </div>
+    </div>
+  );
+}
+
 const L = ({ t, children }: { t: string; children: ReactNode }) => <label className="flex flex-col gap-1 text-[13px] text-[var(--soft)]">{t}{children}</label>;
 type Draft = { firm: string; stage: Stage; assignee: string; source: Source; last_at: string; last_note: string; next: string; due: string; links: string; hold_until: string; lost_reason: string };
 const draftOf = (c: Card | null, me: string, today: string): Draft => c
@@ -172,7 +206,8 @@ const draftOf = (c: Card | null, me: string, today: string): Draft => c
   : { firm: "", stage: "inquiry", assignee: me, source: "inquiry", last_at: "", last_note: "", next: "", due: suggestDue("inquiry", today) || "", links: "", hold_until: "", lost_reason: "" };
 
 function CardSheet({ team, me, card, members, today, onClose, onSaved, onStale }: { team: string; me: string; card: Card | null; members: Member[]; today: string; onClose: () => void; onSaved: (c: Card) => void; onStale: () => void }) {
-  const [d, setD] = useState<Draft>(() => draftOf(card, me, today)), [busy, setBusy] = useState(false), [err, setErr] = useState("");
+  const [d, setD] = useState<Draft>(() => draftOf(card, me, today)), [busy, setBusy] = useState(false), [err, setErr] = useState(""), [log, setLog] = useState<Ev[] | null>(null);
+  useEffect(() => { if (card) api<{ events: Ev[] }>("GET", `/api/sales/teams/${team}/cards/${card.id}/events`).then(r => r.ok && setLog(r.events)); }, [team, card?.id]);
   useEffect(() => { const k = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); }; addEventListener("keydown", k); return () => removeEventListener("keydown", k); }, [onClose]);
   const set = <K extends keyof Draft>(k: K, v: Draft[K]) => setD(x => ({ ...x, [k]: v }));
   const save = async () => {
@@ -205,7 +240,10 @@ function CardSheet({ team, me, card, members, today, onClose, onSaved, onStale }
               <L t="기한"><input type="date" className={field} value={d.due} required onChange={e => set("due", e.target.value)} /></L>
             </div>}
         <L t="원문 링크(줄마다 하나 · 연락처는 넣지 않아요)"><textarea className="min-h-[72px] rounded-xl border border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-[14px]" value={d.links} onChange={e => set("links", e.target.value)} /></L>
-        {card ? <p className="text-[12px] text-[var(--muted)]">마지막으로 고친 사람 {short(members, card.updated_by)} · {new Date(card.updated_at).toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}</p> : null}
+        {log?.length ? <section aria-label="기록" className="flex flex-col gap-1 border-t border-[var(--line)] pt-3 text-[12px] text-[var(--muted)]">
+          <h3 className="text-[13px] font-medium text-[var(--soft)]">기록</h3>
+          {log.slice(0, 20).map((e, i) => <p key={i}>{when(e.at)} {short(members, e.who)} — {evText(e)}</p>)}
+        </section> : null}
         {err ? <p role="alert" className="text-[13px] text-[var(--danger)]">{err}</p> : null}
         <div className="flex gap-2">
           <button type="button" onClick={onClose} className="h-11 flex-1 rounded-xl border border-[var(--line)]">닫기</button>

@@ -5,9 +5,11 @@ import { check, diff, FIELDS, type Card, type Stage, type Source } from "./rules
 type Env = { DB: D1Database };
 type C = Context<{ Bindings: Env }>;
 type Who = (c: C) => Promise<string | null>;   // 로그인한 사람 메일(소문자) — 회원 · 주인 둘 다
+type Known = (c: C, email: string) => Promise<boolean>;   // 보더에 들어올 수 있는 메일(초대 · 주인) — 팀원은 그 안에서만
 type Row = { id: string; team: string; firm: string; stage: string; assignee: string; source: string; last_at: string | null; last_note: string; next: string; due: string | null; links: string; hold_until: string | null; lost_reason: string; ver: number; created_by: string; created_at: number; updated_by: string; updated_at: number };
 
-const TEAMS_MAX = 5, CARDS_MAX = 2000;
+const TEAMS_MAX = 5, CARDS_MAX = 2000, MEMBERS_MAX = 20;
+const EMAIL = /^[^@\s]{1,64}@[^@\s]{1,190}$/;
 const json = <T>(s: unknown, d: T): T => { try { return s ? JSON.parse(String(s)) as T : d; } catch { return d; } };
 const cardOf = (r: Row): Card => ({ firm: r.firm, stage: r.stage as Stage, assignee: r.assignee, source: r.source as Source, last_at: r.last_at, last_note: r.last_note, next: r.next, due: r.due, links: json<string[]>(r.links, []), hold_until: r.hold_until, lost_reason: r.lost_reason });
 const view = (r: Row) => ({ id: r.id, ...cardOf(r), ver: r.ver, created_by: r.created_by, created_at: r.created_at, updated_by: r.updated_by, updated_at: r.updated_at });
@@ -15,7 +17,7 @@ const newId = (p: string) => p + [...crypto.getRandomValues(new Uint8Array(12))]
 const sameSite = (c: C) => c.req.header("x-hb") === "1" && ["same-origin", "none", undefined].includes(c.req.header("sec-fetch-site"));
 const body = (c: C) => c.req.json<Record<string, unknown>>().then(b => b && typeof b === "object" && !Array.isArray(b) ? b : null, () => null);
 
-export function mountSales(host: Hono<any>, who: Who) {
+export function mountSales(host: Hono<any>, who: Who, known: Known) {
   const app = host as unknown as Hono<{ Bindings: Env }>;
   const me = async (c: C, write = false) => {
     if (write && !sameSite(c)) return { err: c.json({ ok: false, error: "forbidden" }, 403) };
@@ -92,6 +94,28 @@ export function mountSales(host: Hono<any>, who: Who) {
     ]);
     if (!u.meta.changes) return c.json({ ok: false, error: "다른 사람이 먼저 고쳤어요 — 새로 불러온 뒤 다시 해 주세요" }, 409);
     return c.json({ ok: true, card: view({ ...row, ...x, links: JSON.stringify(x.links), ver: ver + 1, updated_by: t.e, updated_at: now }) });
+  });
+  // 팀원 더하기 · 빼기 — 관리자만. 더할 사람은 이미 보더 회원(초대된 메일)이어야 함(초대는 보더 초대 길 그대로)
+  app.post("/api/sales/teams/:team/members", async c => {
+    const t = await team(c, true); if (t.err) return t.err;
+    if (t.t.role !== "admin") return c.json({ ok: false, error: "관리자만 팀원을 더할 수 있어요" }, 403);
+    const b = await body(c); if (!b) return c.json({ ok: false, error: "bad json" }, 400);
+    const email = String(b.email ?? "").trim().toLowerCase();
+    if (!EMAIL.test(email)) return c.json({ ok: false, error: "메일 주소가 올바르지 않아요" }, 400);
+    if (t.members.some(m => m.email === email)) return c.json({ ok: true, already: true });
+    if (t.members.length >= MEMBERS_MAX) return c.json({ ok: false, error: `팀원은 ${MEMBERS_MAX}명까지예요` }, 400);
+    if (!(await known(c, email))) return c.json({ ok: false, error: "보더에 초대된 사람만 더할 수 있어요" }, 400);
+    await c.env.DB.prepare("INSERT OR IGNORE INTO sales_member(team, email, role, added_by, at) VALUES (?,?,?,?,?)").bind(t.t.id, email, "member", t.e, Date.now()).run();
+    return c.json({ ok: true });
+  });
+  app.delete("/api/sales/teams/:team/members/:email", async c => {
+    const t = await team(c, true); if (t.err) return t.err;
+    const email = decodeURIComponent(c.req.param("email") || "").toLowerCase();
+    if (t.t.role !== "admin" && email !== t.e) return c.json({ ok: false, error: "관리자만 팀원을 뺄 수 있어요" }, 403);   // 나가기는 누구나
+    const m = t.members.find(x => x.email === email); if (!m) return c.json({ ok: false, error: "팀원이 아니에요" }, 404);
+    if (m.role === "admin" && t.members.filter(x => x.role === "admin").length <= 1) return c.json({ ok: false, error: "마지막 관리자는 뺄 수 없어요" }, 400);
+    await c.env.DB.prepare("DELETE FROM sales_member WHERE team = ? AND email = ?").bind(t.t.id, email).run();   // 그 사람이 담당인 카드는 그대로(담당을 바꿔 줌)
+    return c.json({ ok: true });
   });
   app.get("/api/sales/teams/:team/cards/:id/events", async c => {
     const t = await team(c); if (t.err) return t.err;

@@ -17,6 +17,7 @@
     saved: lu('bookmark'),
     copy: lu('copy'),
     invite: lu('user-plus'),
+    sales: lu('kanban'),
     feedback: lu('message-square-text'),
     out: lu('log-out'),
     flag: lu('flag'),
@@ -250,6 +251,8 @@
   const mi = (k, icon, label) => `<button type="button" class="bx-it" data-mi="${k}" role="menuitem">${icon}<span>${label}</span></button>`;
   const mp = mk('div', 'bx-mpop', (window.HB_MEMBER ? '' : mi('invite', I.invite, '초대')) + mi('feedback', I.feedback, '피드백') + mi('out', I.out, '로그아웃'));
   mp.hidden = true; mp.setAttribute('role', 'menu'); document.body.append(mp);
+  // 영업 보드(/sales): 팀이 있는 사람에게만 메뉴 한 줄(없으면 안 보임 — 처음 팀은 /sales 주소로 만듦)
+  fetch('/api/sales/teams', {credentials: 'include'}).then(r => r.ok ? r.json() : null).then(j => { if (j?.teams?.length) mp.insertAdjacentHTML('afterbegin', mi('sales', I.sales, '영업 보드')); }).catch(() => {});
   const mtoast = t => { let el = $id('bx-toast'); if (!el){ el = mk('div', 'bx-toast'); el.id = 'bx-toast'; el.setAttribute('role', 'status'); document.body.append(el); } el.textContent = t; el.classList.add('on'); clearTimeout(mtoast.t); mtoast.t = setTimeout(() => el.classList.remove('on'), 1800); };
   const mpost = (u, b) => fetch(u, {method: 'POST', credentials: 'include', headers: {'content-type': 'application/json', 'x-hb': '1'}, body: JSON.stringify(b || {})});
   function meOpen(btn){
@@ -262,6 +265,7 @@
     const k = e.target.closest('[data-mi]')?.dataset.mi; if (!k) return;
     if (k === 'copy'){ meClose(); closeDr(); try { const r = await fetch('api/install/prompt', {credentials: 'include'}); if (!r.ok) throw 0; await navigator.clipboard.writeText(await r.text()); mtoast('복사했어요 — AI 도구에 붙여넣어요'); } catch { mtoast('일시적인 오류가 발생했어요'); } }
     if (k === 'invite'){ meClose(); closeDr(); window.BXSettings?.enter('invite-box'); }
+    if (k === 'sales'){ meClose(); location.href = '/sales'; }
     if (k === 'feedback'){ meClose(); closeDr(); window.BXSettings?.enter('feedback'); }
     if (k === 'out'){ await mpost('api/auth/sign-out'); location.reload(); }
   });

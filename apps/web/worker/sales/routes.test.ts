@@ -34,7 +34,8 @@ function setup() {
   for (const f of readdirSync(dir).filter(f => /_sales(_[a-z]+)?\.sql$/.test(f)).sort()) db.exec(readFileSync(new URL(f, dir), "utf8"));
   db.exec('create table "user" (email text, name text)');   // better-auth 표에서 쓰는 칸만
   const app = new Hono();
-  mountSales(app, async c => c.req.header("x-test-user") || null);
+  const invited = new Set(["a@example.com", "b@example.com", "x@example.com"]);
+  mountSales(app, async c => c.req.header("x-test-user") || null, async (_c, e) => invited.has(e));
   const env = { DB: d1(db) };
   const call = async (who: string | null, method: string, path: string, body?: unknown, hb = true) => {
     const h: Record<string, string> = { "content-type": "application/json" };
@@ -113,4 +114,18 @@ test("단계 규칙은 서버가 검사: 놓침은 이유 없이 400, 팀 밖 �
   assert.equal((await call(A, "POST", `/api/sales/teams/${tid}/cards`, { ...card, assignee: X })).status, 400);
   const ok = await call(A, "PATCH", `/api/sales/teams/${tid}/cards/${c.id}`, { ver: 1, stage: "lost", lost_reason: "가격" });
   assert.equal(ok.status, 200); assert.equal(ok.j.card.stage, "lost");
+});
+
+test("팀원 더하기 · 빼기: 관리자만, 초대된 사람만, 마지막 관리자는 못 뺌, 빠지면 바로 못 봄", async () => {
+  const { call } = setup();
+  const tid = (await call(A, "POST", "/api/sales/teams", { name: "영업" })).j.team.id;
+  assert.equal((await call(A, "POST", `/api/sales/teams/${tid}/members`, { email: "nobody@example.com" })).status, 400, "초대 안 된 메일");
+  assert.equal((await call(A, "POST", `/api/sales/teams/${tid}/members`, { email: "B@example.com" })).status, 200);
+  assert.equal((await call(B, "GET", `/api/sales/teams/${tid}/cards`)).status, 200);
+  assert.equal((await call(B, "POST", `/api/sales/teams/${tid}/members`, { email: X })).status, 403, "팀원은 못 더함");
+  assert.equal((await call(X, "POST", `/api/sales/teams/${tid}/members`, { email: X })).status, 404, "밖 사람은 팀이 안 보임");
+  assert.equal((await call(A, "DELETE", `/api/sales/teams/${tid}/members/${encodeURIComponent(A)}`)).status, 400, "마지막 관리자");
+  assert.equal((await call(B, "DELETE", `/api/sales/teams/${tid}/members/${encodeURIComponent(A)}`)).status, 403);
+  assert.equal((await call(A, "DELETE", `/api/sales/teams/${tid}/members/${encodeURIComponent(B)}`)).status, 200);
+  assert.equal((await call(B, "GET", `/api/sales/teams/${tid}/cards`)).status, 404);
 });

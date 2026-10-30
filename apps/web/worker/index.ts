@@ -764,7 +764,7 @@ mountImport(app as never, {
   member: async c => { const s = await signedIn(c as never); return s && !isOwner(c.env as never, s.user.email) ? s.user.email.toLowerCase() : null; },
   sameSite: c => sameSite(c as never),
 });
-mountSales(app as never, async c => { const s = await signedIn(c as never); return s ? s.user.email.toLowerCase() : null; });   // 영업 보드(sales/) — 팀원 검사는 그 안에서
+mountSales(app as never, async c => { const s = await signedIn(c as never); return s ? s.user.email.toLowerCase() : null; }, (c, email) => member(c.env as never, email));   // 영업 보드(sales/) — 팀원 검사는 그 안에서
 const memberBot = (env: Env, me: string) => env.DB.prepare("SELECT seed, hue, name, photo, icon, fav FROM member_bot WHERE owner = ?").bind(me).first<Bot>();
 const BLOB_ID = /^[0-9a-f]{32}$/;
 const botKey = (env: Env, email: string) => isOwner(env, email) ? "@owner" : email.toLowerCase();
