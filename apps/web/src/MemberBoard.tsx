@@ -117,19 +117,19 @@ function CardBox({ c, open, onOpen, onDone }: { c: Card; open: boolean; onOpen: 
       </>}
       {err && <p className="text-[13px] text-[var(--danger)]">{err}</p>}
       <button type="button" className="self-start text-[13px] text-[var(--soft)] underline" onClick={() => onOpen(!open)}>{open ? "스레드 닫기" : `스레드${c.replies ? ` ${c.replies}` : ""}`}</button>
-      {open && <Thread id={c.id} />}
+      {open && <Thread id={c.id} onSent={onDone} />}
     </article>
   );
 }
 
-function Thread({ id }: { id: string }) {
+function Thread({ id, onSent }: { id: string; onSent: () => void }) {
   const [ms, setMs] = useState<TMsg[] | null>(null), [text, setText] = useState(""), [busy, setBusy] = useState(false), [err, setErr] = useState(""), [note, setNote] = useState("");
   const load = useCallback(async () => { const r = await api<{ messages: TMsg[] }>("GET", `/api/me/cards/${encodeURIComponent(id)}/thread`); r.ok ? setMs(r.messages) : setErr(r.error); }, [id]);
   usePoll(load);
   const send = async () => {
     setBusy(true); setErr(""); const r = await api<{ delivered: boolean }>("POST", `/api/me/cards/${encodeURIComponent(id)}/reply`, { text }); setBusy(false);
     if (!r.ok) return setErr(r.error);
-    setText(""); setNote(r.delivered ? "" : "이 카드를 낸 창이 없어 글만 남겼어요"); load();
+    setText(""); setNote(r.delivered ? "" : "이 카드를 낸 창이 없어 글만 남겼어요"); load(); onSent();
   };
   return (
     <div className="flex flex-col gap-2 border-t border-[var(--line)] pt-2">
