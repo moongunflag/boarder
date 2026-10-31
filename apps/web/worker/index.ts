@@ -33,6 +33,7 @@ import { catalog } from "./connectors/store";
 import { open as unseal, seal } from "./connectors/seal";
 import { mountImport, onCardAnswered } from "./importer/routes";
 import { mountSales } from "./sales/routes";
+import { mountMember, notify as memberNotify, cardPush } from "./member/routes";
 import * as ledger from "./ledger";
 import * as ownerWrite from "./owner-write";
 import * as ledgerWrite from "./ledger-write";
@@ -451,7 +452,8 @@ async function agentCtx(c: Context<{ Bindings: Env }>) {
       return `${c.env.PUBLIC_URL}/api/agent/result/${id}`;
     },
     owner,
-    ...(who.owner ? { local: localTools(c.env.DB, who.owner, who.win || who.pane, c.env.PUBLIC_URL, who.pane) } : {}),
+    ...(who.owner ? { local: localTools(c.env.DB, who.owner, who.win || who.pane, c.env.PUBLIC_URL, who.pane,
+      (id, kind, q) => c.executionCtx.waitUntil(memberNotify(c.env, who.owner!, cardPush(id, kind, q, who.win || who.pane)).catch(e => console.error("회원 푸시", e)))) } : {}),
     host: who.host, win: who.win || who.pane,
     conn: { env: c.env, owner: who.owner || "", scope: who.tools ?? "*", catalog: (() => { let p: ReturnType<typeof catalog> | undefined; return () => (p ??= catalog(c.env, who.owner || "", w => c.executionCtx.waitUntil(w))); })() },
   };
@@ -764,7 +766,9 @@ mountImport(app as never, {
   member: async c => { const s = await signedIn(c as never); return s && !isOwner(c.env as never, s.user.email) ? s.user.email.toLowerCase() : null; },
   sameSite: c => sameSite(c as never),
 });
-mountSales(app as never, async c => { const s = await signedIn(c as never); return s ? s.user.email.toLowerCase() : null; }, (c, email) => member(c.env as never, email));   // 영업 보드(sales/) — 팀원 검사는 그 안에서
+mountSales(app as never, async c => { const s = await signedIn(c as never); return s ? s.user.email.toLowerCase() : null; }, (c, email) => member(c.env as never, email));
+mountMember(app as never, async c => { const s = await signedIn(c as never); return s && !isOwner(c.env as never, s.user.email) ? s.user.email.toLowerCase() : null; },   // 회원 보드 더하기(member/) — 할 일 · 카드 스레드 · 푸시
+  (c, me, wid, text) => deliverTo(c.env as never, me, wid, text));   // 영업 보드(sales/) — 팀원 검사는 그 안에서
 const memberBot = (env: Env, me: string) => env.DB.prepare("SELECT seed, hue, name, photo, icon, fav FROM member_bot WHERE owner = ?").bind(me).first<Bot>();
 const BLOB_ID = /^[0-9a-f]{32}$/;
 const botKey = (env: Env, email: string) => isOwner(env, email) ? "@owner" : email.toLowerCase();
@@ -1347,7 +1351,12 @@ app.all("*", async c => {
       const bot = await memberBot(c.env, s.user.email.toLowerCase()), js = { blob: blobJs, pick: botPickJs };
       if (!bot) return c.html(memberOnboard(s.user.email, js), 200, { ...NOFRAME, "cache-control": "no-store" });
       const pg = await memberPage(c, s.user.email.toLowerCase(), (await c.env.DB.prepare("SELECT name FROM \"user\" WHERE email = ?").bind(s.user.email).first<{ name: string }>().catch(() => null))?.name, bot);
-      return pg ?? c.html("<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'><p style='font:15px system-ui;padding:40px'>일시적인 오류가 발생했어요</p>", 503, { ...NOFRAME, "cache-control": "no-store", "retry-after": "5" });
+      if (pg) return pg;
+      // 보드 틀(page)이 없는 판(우리 판 — 틀은 공개 밖): 앱의 회원 보드(src/MemberBoard.tsx)를 내줌
+      const app0 = await c.env.ASSETS.fetch(new Request(new URL("/", url), c.req.raw)), h0 = new Headers(app0.headers);
+      for (const [k, v] of Object.entries(NOFRAME)) h0.set(k, v);
+      h0.set("cache-control", "no-store");
+      return new Response(app0.body, { status: 200, headers: h0 });
     }
     {
       const me = s.user.email.toLowerCase();

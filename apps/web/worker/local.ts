@@ -1,9 +1,10 @@
+import { kindOf } from "./member/routes";
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 // 카드 id 는 지금 카드 꼴(초.여섯 자리)과 같게 — 도구 입력 검사(tsId)를 그대로 씀
 const cardId = () => `${Math.floor(Date.now() / 1000)}.${String(crypto.getRandomValues(new Uint32Array(1))[0] % 1_000_000).padStart(6, "0")}`;
 type Card = { id: string; state: string; question: string; choices: string; answer: string | null; answered_at: number | null; done: string | null; win: string; at: number };
 
-export function localTools(db: D1Database, owner: string, win: string, publicUrl: string, key = "") {
+export function localTools(db: D1Database, owner: string, win: string, publicUrl: string, key = "", onAsk?: (id: string, kind: string, question: string) => void) {
   const wid = /:(ew_[a-z0-9]{6,30})$/.exec(key)?.[1] ?? null;
   const log = (kind: string, text: string, thread?: string) =>
     db.prepare("INSERT INTO board_log(owner, win, kind, text, thread, at, wid) VALUES (?,?,?,?,?,?,?)").bind(owner, win, kind, text, thread ?? null, Date.now(), wid).run();
@@ -30,8 +31,10 @@ export function localTools(db: D1Database, owner: string, win: string, publicUrl
       }
       case "inbox_ask": {
         const id = cardId();
-        await db.prepare("INSERT INTO board_card(id, owner, win, question, choices, recommend, body, at, wid) VALUES (?,?,?,?,?,?,?,?,?)")
-          .bind(id, owner, win, a.question, JSON.stringify(a.choices), a.recommend ?? null, a.body ?? null, Date.now(), wid).run();
+        const kind = kindOf(a.kind);   // 할 일(todo)은 화면에서 결정 카드와 따로(member/routes.ts)
+        await db.prepare("INSERT INTO board_card(id, owner, win, question, choices, recommend, body, at, wid, kind) VALUES (?,?,?,?,?,?,?,?,?,?)")
+          .bind(id, owner, win, a.question, JSON.stringify(a.choices), a.recommend ?? null, a.body ?? null, Date.now(), wid, kind).run();
+        onAsk?.(id, kind, String(a.question));
         const res = { card_id: id, thread_id: id, url: `${publicUrl}/` };
         return a.wait_s ? { ...res, ...(await wait(id, a.wait_s)) } : res;
       }

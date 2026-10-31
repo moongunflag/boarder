@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { SignIn } from "./SignIn";
 import { Device } from "./Device";
 import { Sales } from "./Sales";
+import { MemberBoard } from "./MemberBoard";
 import { Frame, type Counts } from "./Frame";
 import { useRoute, AREA_NAME } from "./lib/route";
 import { useBoard, attnCount } from "./lib/board";
@@ -14,7 +15,16 @@ export function App() {
   const [me, setMe] = useState<Me | undefined>(undefined), [route, go] = useRoute();
   if (location.pathname === "/device") return me ? <Device email={me.email} /> : <Gate me={me} setMe={setMe} />;
   if (location.pathname === "/sales") return me ? <Sales email={me.email} /> : <Gate me={me} setMe={setMe} />;
-  return me === undefined || !me ? <Gate me={me} setMe={setMe} /> : <Signed route={route} go={go} onOut={() => setMe(null)} />;
+  if (!me) return <Gate me={me} setMe={setMe} />;
+  return location.pathname === "/" ? <Home email={me.email} signed={<Signed route={route} go={go} onOut={() => setMe(null)} />} /> : <Signed route={route} go={go} onOut={() => setMe(null)} />;
+}
+
+// 「/」: 회원이면 회원 보드(우리 판 — 보드 틀이 없을 때 Worker 가 앱을 내줌), 주인이면 원래 화면
+function Home({ email, signed }: { email: string; signed: ReactNode }) {
+  const [member, setMember] = useState<boolean | null>(null);
+  useEffect(() => { fetch("/api/me/inbox", { credentials: "include", headers: { "x-hb": "1" } }).then(r => setMember(r.ok), () => setMember(false)); }, []);
+  if (member === null) return <div className="grid min-h-dvh place-items-center"><span className="g g-spin" aria-label="불러오는 중" /></div>;
+  return member ? <MemberBoard email={email} /> : <>{signed}</>;
 }
 
 function Gate({ me, setMe }: { me: Me | undefined; setMe: (m: Me) => void }) {

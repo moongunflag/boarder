@@ -36,7 +36,7 @@ async function load(db: D1Database, me: string) {
     db.prepare("SELECT key, kind, engine, title, cwd, branch, refs, state, state_at, seen_at, win, device_id, gone_at FROM imp_item WHERE owner = ? AND (gone_at IS NULL OR gone_at > ?)").bind(me, Date.now() - 24 * 3600_000),
     db.prepare("SELECT pane, win FROM agent_token WHERE owner = ? ORDER BY created_at").bind(me),
     db.prepare("SELECT id, win, kind, text, thread, at FROM board_log WHERE owner = ? ORDER BY at DESC LIMIT 600").bind(me),
-    db.prepare("SELECT rowid AS n, id, win, question, choices, recommend, body, state, answer, at FROM board_card WHERE owner = ? AND (state = 'open' OR (state = 'answered' AND answered_at > ?)) ORDER BY at DESC LIMIT 100").bind(me, Date.now() - 86_400_000),
+    db.prepare("SELECT rowid AS n, id, win, kind, question, choices, recommend, body, state, answer, at FROM board_card WHERE owner = ? AND (state = 'open' OR (state = 'answered' AND answered_at > ?)) ORDER BY at DESC LIMIT 100").bind(me, Date.now() - 86_400_000),
     db.prepare("SELECT rowid AS n, id, name, brief, at FROM (SELECT rowid, id, name, brief, created_at AS at FROM role_draft WHERE owner = ? AND state = 'draft' ORDER BY created_at DESC LIMIT 30)").bind(me),
     db.prepare("SELECT id, kind, name, state, state_at, note, created_at, closed_at FROM engine_window WHERE owner = ? AND (state NOT IN ('closed','failed','gone') OR state_at > ?) ORDER BY created_at DESC LIMIT 60").bind(me, Date.now() - 12 * 3600_000),
   ]);
@@ -89,8 +89,10 @@ export async function data(db: D1Database, me: string, bot: { name?: string } | 
   }
   const known = new Set(panes.map(p => p.pane)), toPane = (win: string) => { const n = L.nodeOfWin(win); return n && known.has(n.pane) ? n.pane : PRIMARY; };
   const decisions: R[] = [], cardlist: R[] = [];
+  const todos: R[] = [];
   for (const c of L.cards) {
     const id = "w" + c.n, ch = json<string[]>(c.choices, []).map(x => cut(x, 90));
+    if (c.kind === "todo") { if (c.state === "open") todos.push({ id: c.id, pane: toPane(c.win), win: c.win, title: cut(c.question, 200), body: cut(c.body || "", 600), ago: ago(c.at) }); continue; }   // 할 일은 결정 줄과 따로(member/routes.ts)
     if (c.state === "open") decisions.push({ id, src: "wlog", pane: toPane(c.win), win: c.win, area: "primary", title: cut(c.question, 200), body: cut(c.body || "", 600), choices: c.recommend && ch.includes(c.recommend) ? [c.recommend, ...ch.filter(x => x !== c.recommend)] : ch, ago: ago(c.at), kind: "결정" });
     cardlist.push({ ts: "w:" + c.n, ref: "w:" + c.n, thread: null, channel: "primary", kind: "decision", area: "primary", state: c.state === "open" ? "open" : "answered", title: cut(c.question, 80), at: c.at / 1000 });
   }
@@ -103,7 +105,7 @@ export async function data(db: D1Database, me: string, bot: { name?: string } | 
   const feed = L.logs.filter(r => !OWN.test(r.win) && r.thread !== "primary" && r.kind !== "me").slice(0, 40).map(r => ({ id: r.id, ago: ago(r.at), pane: L.nodeOfWin(r.win)?.pane || PRIMARY, win: cut(r.win, 30), kind: KIND_KO[r.kind] || r.kind, msg: cut(r.text, 160) }));
   return { generated: kst(now), areas: [{ key: "primary", name: "Primary", lead: PRIMARY }], panes, closed, parked, archived: [], decisions, to_check: [], promises: [], feed,
     park_metrics: { at: Math.floor(now / 1000), open: panes.length, due: 0, overdue: 0, overdue_names: [], parked: parked.length, reopen_ok_24h: 0, reopen_fail_24h: 0, overdue_max_24h: 0 },
-    cards: [], cardlist, attn: null, relinks: {}, todos: [], bthreads: [] };
+    cards: [], cardlist, attn: null, relinks: {}, todos, bthreads: [] };
 }
 
 // ── 채팅(chat.py norm 꼴) ──
